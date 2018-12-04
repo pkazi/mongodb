@@ -52,11 +52,15 @@ define :mongodb_instance,
 
     # Search for config servers
     unless node['mongodb']['config']['mongos']['sharding']['configDB']
-      node.default['mongodb']['config']['mongos']['sharding']['configDB'] = params[:configservers].map do |n|
+      new_resource.configservers = params[:configservers].map do |n|
         "#{(n['mongodb']['configserver_url'] || n['fqdn'])}:#{n['mongodb']['config']['mongod']['net']['port']}"
       end.sort.join(',')
 
-      # TODO: handle 3.2 config server replicasets
+    # Get the replica set name of first config server, since mongodb 3.4 requires replicated config servers
+    new_resource.configserver_replSetName = params[:configservers].map.first['mongodb']['config']['mongod']['replication']['replSetName']
+    
+    node.default['mongodb']['config']['mongos']['sharding']['configDB'] = "#{new_resource.configserver_replSetName}/#{new_resource.configservers}"
+    # TODO: handle 3.2 config server replicasets
       # if node['mongodb']['package_version'].to_f >= 3.2
       #   node.default['mongodb']['config']['sharding']['configDB']
       # end
@@ -232,8 +236,8 @@ define :mongodb_instance,
     new_resource.service_notifies.each do |service_notify|
       notifies :run, service_notify
     end
-    notifies :run, 'ruby_block[config_replicaset]', :immediately if new_resource.is_replicaset && new_resource.auto_configure_replicaset
-    notifies :run, 'ruby_block[config_sharding]', :immediately if new_resource.is_mongos && new_resource.auto_configure_sharding
+    #notifies :run, 'ruby_block[config_replicaset]', :immediately if new_resource.is_replicaset && new_resource.auto_configure_replicaset
+    #notifies :run, 'ruby_block[config_sharding]', :immediately if new_resource.is_mongos && new_resource.auto_configure_sharding
     # we don't care about a running mongodb service in these cases, all we need is stopping it
     ignore_failure true if new_resource.name == 'mongodb'
   end

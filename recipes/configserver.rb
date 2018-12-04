@@ -22,6 +22,7 @@
 #
 
 node.override['mongodb']['is_configserver'] = true
+node.override['mongodb']['is_replicaset'] = true
 node.override['mongodb']['cluster_name'] = node['mongodb']['cluster_name']
 
 include_recipe 'sc-mongodb::install'
@@ -31,4 +32,5 @@ include_recipe 'sc-mongodb::install'
 # we still explicitly set the port and small files.
 mongodb_instance node['mongodb']['instance_name']['mongod'] do
   mongodb_type 'configserver'
+  replicaset true
 end
