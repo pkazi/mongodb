@@ -24,6 +24,9 @@
 # install the mongodb org repo if necessary
 include_recipe 'sc-mongodb::mongodb_org_repo' if node['mongodb']['install_method'] == 'mongodb-org'
 
+# install ruby gems required for mongodb
+include_recipe 'sc-mongodb::mongo_gem'
+
 # TODO: still need all of the tools?
 # yum_package[autoconf, bison, flex, gcc, gcc-c++, gettext, kernel-devel, make, m4, ncurses-devel, patch]
 build_essential 'build-tools'
