@@ -53,7 +53,7 @@ define :mongodb_instance,
     # Search for config servers
     unless node['mongodb']['config']['mongos']['sharding']['configDB']
       new_resource.configservers = params[:configservers].map do |n|
-        "#{(n['mongodb']['configserver_url'] || n['fqdn'])}:#{n['mongodb']['config']['mongod']['net']['port']}"
+        "#{(n['mongodb']['configserver_url'] || n['ipaddress'])}:#{n['mongodb']['config']['mongod']['net']['port']}"
       end.sort.join(',')
 
     # Get the replica set name of first config server, since mongodb 3.4 requires replicated config servers
@@ -273,11 +273,10 @@ define :mongodb_instance,
     shard_nodes = search(
       :node,
       "mongodb_cluster_name:#{new_resource.cluster_name} AND "\
-      "mongodb_shard_name:#{new_resource.shard_name} AND "\
       'mongodb_is_shard:true AND '\
       "chef_environment:#{node.chef_environment}"
     )
-
+    #"mongodb_shard_name:#{new_resource.shard_name} AND "\
     ruby_block 'config_sharding' do
       block do
         MongoDB.configure_shards(node, shard_nodes)

@@ -265,7 +265,7 @@ class Chef::ResourceDefinitionList::MongoDB
       else
         key = '_single'
       end
-      shard_groups[key] << "#{n['fqdn']}:#{n['mongodb']['config']['mongod']['net']['port']}"
+      shard_groups[key] << "#{n['ipaddress']}:#{n['mongodb']['config']['mongod']['net']['port']}"
     end
     Chef::Log.info(shard_groups.inspect)
 
