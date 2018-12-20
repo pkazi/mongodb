@@ -32,10 +32,42 @@ class Chef::ResourceDefinitionList::MongoDB
   # if node['fqnd'] is a vagrant host, ignore it
   # node['mongodb']['replica_priority'] is required
   #
+
+  def self.node_up?(mongo_host, mongo_port)
+    begin
+      connection = nil
+      rescue_connection_failure do
+        connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
+        connection.database_names # check connection
+      end
+    rescue => e
+      Chef::Log.warn("Could not connect to database: '#{mongo_host}:#{mongo_port}', reason: #{e}")
+      return false
+    end
+    return true
+  end
+
+  def self.get_primary_node(mongo_host, mongo_port)
+    connection = nil
+    rescue_connection_failure do
+      connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
+      connection.database_names # check connection
+      admin = connection['admin']
+      cmd = BSON::OrderedHash.new
+      cmd['isMaster'] = 1
+      result = admin.command(cmd, check_response: false)
+      result.fetch('primary', nil)
+    end
+  rescue => e
+    Chef::Log.warn("Could not get the primary node from : '#{mongo_host}:#{mongo_port}', reason: #{e}")
+    # return
+    raise "Could not get the primary node from : '#{mongo_host}:#{mongo_port}', reason: #{e}"
+  end
+
   def self.cluster_up_to_date?(from_server, expected)
     cut_down = from_server.map do |s|
       other = expected.select { |e| s['_id'] == e['_id'] }.first
-      s.select { |k, _v| other.keys.include?(k) }
+      s.select { |k, _v| other.keys.include?(k) } unless other.nil?
     end
 
     cut_down == expected
@@ -79,8 +111,40 @@ class Chef::ResourceDefinitionList::MongoDB
       Chef::Log.warn('Cannot search for member nodes with chef-solo, defaulting to single node replica set')
     end
 
-    mongo_host = 'localhost'
-    mongo_port = node['mongodb']['config']['mongod']['net']['port']
+    Chef::Log.debug('Removing Self from replica set nodes.')
+    members.delete_if { |m| m['ipaddress'] == node['ipaddress'] }
+
+    Chef::Log.info("Checking Mongo node availability from chef search resulted nodes :  #{members.map { |n| n['hostname'] }.join(', ')}") unless members.empty?
+    members_dup = members.dup
+    members_dup.collect do |member|
+      mongo_fqdn = member['hostname']
+      mongo_host = member['ipaddress']
+      mongo_port = member['mongodb']['config']['mongod']['net']['port']
+      if node_up?(mongo_host, mongo_port)
+        Chef::Log.info("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is accessible. Nothing to do.")
+      else
+        Chef::Log.warn("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is not accessible. Removing it from chef search results.")
+        members.delete_if { |m| m['ipaddress'] == mongo_host }
+      end
+    end
+
+    if members.empty?
+      Chef::Log.debug("This is the first node from replica set #{name}.")
+      mongo_host = 'localhost'
+      mongo_port = node['mongodb']['config']['mongod']['net']['port']
+    else
+      Chef::Log.debug("This is not the first node from replica set #{name}, searching for primary node.")
+      remote_host = members.first['ipaddress']
+      remote_port = members.first['mongodb']['config']['mongod']['net']['port']
+      primary_node = get_primary_node(remote_host, remote_port)
+      if primary_node.nil?
+        Chef::Log.warn("No primary node found for replica set #{name} [ #{mongo_host}:#{mongo_port} ], Please check mongodb instance status.")
+        return
+      end
+      Chef::Log.debug("#{primary_node} is the primary node from replica set #{name}.")
+      mongo_host = primary_node.split(':')[0]
+      mongo_port = primary_node.split(':')[1]
+    end
 
     begin
       connection = nil
@@ -198,7 +262,8 @@ class Chef::ResourceDefinitionList::MongoDB
         ids = (0...256).to_a - old_ids
 
         # use the _id value when present, use a generated one from ids otherwise
-        new_members = new_members_by_host.map { |h, m| old_members_by_host.fetch(h, {}).merge(m) }
+        # new_members = new_members_by_host.map { |h, m| old_members_by_host.fetch(h, {}).merge(m) }
+        new_members = new_members_by_host.map { |h, m| old_members_by_host.fetch(h, {}).empty? ? m.merge({"_id" => old_ids.max+1 }) : m.merge(old_members_by_host.fetch(h, {})) }
 
         new_members.map! { |member| member.merge('_id' => (member['_id'] || ids.shift)) }
 
@@ -255,6 +320,19 @@ class Chef::ResourceDefinitionList::MongoDB
     require 'mongo'
 
     shard_groups = Hash.new { |h, k| h[k] = [] }
+
+    Chef::Log.info("Checking Mongo node availability from chef search resulted nodes :  #{shard_nodes.map { |n| n['hostname'] }.join(', ')}")
+    shard_nodes.collect do |member|
+      mongo_fqdn = member['hostname']
+      mongo_host = member['ipaddress']
+      mongo_port = member['mongodb']['config']['mongod']['net']['port']
+      if node_up?(mongo_host, mongo_port)
+        Chef::Log.info("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is accessible. Nothing to do.")
+      else
+        Chef::Log.warn("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is not accessible. Removing it from chef search results.")
+        shard_nodes.delete_if { |m| m['ipaddress'] == mongo_host }
+      end
+    end
 
     shard_nodes.each do |n|
       if n['recipes'].include?('sc-mongodb::replicaset')

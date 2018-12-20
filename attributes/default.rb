@@ -117,3 +117,5 @@ default['mongodb']['ruby_gems'] = {
   mongo: '~> 1.12',
   bson_ext: nil,
 }
+
+default['mongodb']['use_ip_address'] = true
