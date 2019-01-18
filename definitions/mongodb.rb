@@ -56,11 +56,11 @@ define :mongodb_instance,
         "#{(n['mongodb']['configserver_url'] || n['ipaddress'])}:#{n['mongodb']['config']['mongod']['net']['port']}"
       end.sort.join(',')
 
-    # Get the replica set name of first config server, since mongodb 3.4 requires replicated config servers
-    new_resource.configserver_replSetName = params[:configservers].map.first['mongodb']['config']['mongod']['replication']['replSetName']
-    
-    node.default['mongodb']['config']['mongos']['sharding']['configDB'] = "#{new_resource.configserver_replSetName}/#{new_resource.configservers}"
-    # TODO: handle 3.2 config server replicasets
+      # Get the replica set name of first config server, since mongodb 3.4 requires replicated config servers
+      new_resource.configserver_replSetName = params[:configservers].map.first['mongodb']['config']['mongod']['replication']['replSetName']
+
+      node.default['mongodb']['config']['mongos']['sharding']['configDB'] = "#{new_resource.configserver_replSetName}/#{new_resource.configservers}"
+      # TODO: handle 3.2 config server replicasets
       # if node['mongodb']['package_version'].to_f >= 3.2
       #   node.default['mongodb']['config']['sharding']['configDB']
       # end
@@ -121,6 +121,7 @@ define :mongodb_instance,
   new_resource.template_cookbook          = node['mongodb']['template_cookbook']
   new_resource.ulimit                     = node['mongodb']['ulimit']
   new_resource.reload_action              = node['mongodb']['reload_action']
+  new_resource.systemd_unit_template      = node['mongodb']['systemd_unit_template']
 
   # Upstart or sysvinit
   if node['platform'] == 'ubuntu' && node['platform_version'].to_f < 15.04
@@ -130,6 +131,7 @@ define :mongodb_instance,
     new_resource.init_file = File.join(node['mongodb']['init_dir'], new_resource.name)
     mode = '0755'
   end
+  new_resource.systemd_unit_file = File.join(node['mongodb']['systemd_unit_dir'], "#{new_resource.name}.service")
 
   # TODO(jh): reimplement using polymorphism
   replicaset_name = if new_resource.is_replicaset
@@ -207,27 +209,41 @@ define :mongodb_instance,
     action :nothing
   end
 
-  # init script
-  template new_resource.init_file do
+  # /usr/lib/systemd/system unit file
+  template new_resource.systemd_unit_file do
     cookbook new_resource.template_cookbook
-    source new_resource.init_script_template
+    source new_resource.systemd_unit_template
     group new_resource.root_group
     owner 'root'
-    mode mode
+    mode '0644'
     variables(
-      provides: provider,
-      dbconfig_file: new_resource.dbconfig_file,
-      sysconfig_file: new_resource.sysconfig_file,
-      ulimit: new_resource.ulimit,
-      bind_ip: new_resource.bind_ip,
-      port: new_resource.port
+      provides: provider
     )
+    notifies :run, "execute[mongodb-systemctl-daemon-reload-#{new_resource.name}]", :immediately
     notifies new_resource.reload_action, "service[#{new_resource.name}]"
-
-    if (platform_family?('rhel') && node['platform'] != 'amazon' && node['platform_version'].to_i >= 7) || (node['platform'] == 'debian' && node['platform_version'].to_i >= 8)
-      notifies :run, "execute[mongodb-systemctl-daemon-reload-#{new_resource.name}]", :immediately
-    end
   end
+
+  # # init script
+  # template new_resource.init_file do
+  #   cookbook new_resource.template_cookbook
+  #   source new_resource.init_script_template
+  #   group new_resource.root_group
+  #   owner 'root'
+  #   mode mode
+  #   variables(
+  #     provides: provider,
+  #     dbconfig_file: new_resource.dbconfig_file,
+  #     sysconfig_file: new_resource.sysconfig_file,
+  #     ulimit: new_resource.ulimit,
+  #     bind_ip: new_resource.bind_ip,
+  #     port: new_resource.port
+  #   )
+  #   notifies new_resource.reload_action, "service[#{new_resource.name}]"
+
+  #   if (platform_family?('rhel') && node['platform'] != 'amazon' && node['platform_version'].to_i >= 7) || (node['platform'] == 'debian' && node['platform_version'].to_i >= 8)
+  #     notifies :run, "execute[mongodb-systemctl-daemon-reload-#{new_resource.name}]", :immediately
+  #   end
+  # end
 
   # service
   service new_resource.name do

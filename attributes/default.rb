@@ -80,6 +80,8 @@ default['mongodb']['is_shard'] = nil
 default['mongodb']['is_configserver'] = nil
 
 default['mongodb']['reload_action'] = 'restart' # or "nothing"
+default['mongodb']['systemd_unit_template'] = 'percona-redhat-mongodb.service.erb'
+default['mongodb']['systemd_unit_dir'] = '/usr/lib/systemd/system'
 
 case node['platform_family']
 when 'rhel', 'fedora'

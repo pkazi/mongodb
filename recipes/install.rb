@@ -21,8 +21,14 @@
 # limitations under the License.
 #
 
+unless platform_family?('rhel')
+  Chef::Log.error('This customized cookbook supports only RHEL platform family.')
+  raise 'This customized cookbook supports only RHEL platform family.'
+end
+
 # install the mongodb org repo if necessary
 include_recipe 'sc-mongodb::mongodb_org_repo' if node['mongodb']['install_method'] == 'mongodb-org'
+include_recipe 'sc-mongodb::percona_mongodb_repo' if node['mongodb']['install_method'] == 'percona-mongodb'
 
 # install ruby gems required for mongodb
 include_recipe 'sc-mongodb::mongo_gem'
@@ -92,11 +98,7 @@ template "#{init_file} install" do
     port: config['net']['port']
   )
   action :create_if_missing
-end
-
-service 'mongod' do
-  supports start: true, stop: true, restart: true, status: true
-  action :enable
+  only_if { node['mongodb']['install_method'] == 'mongodb-org' }
 end
 
 # Adjust the version number for RHEL style if needed
@@ -119,6 +121,11 @@ package node['mongodb']['package_name'] do
   action :install
   version package_version
   not_if { node['mongodb']['install_method'] == 'none' }
+end
+
+service 'mongod' do
+  supports start: true, stop: true, restart: true, status: true
+  action :enable
 end
 
 # Change needed so that updates work properly on debian based systems
