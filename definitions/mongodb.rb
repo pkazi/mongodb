@@ -122,6 +122,7 @@ define :mongodb_instance,
   new_resource.ulimit                     = node['mongodb']['ulimit']
   new_resource.reload_action              = node['mongodb']['reload_action']
   new_resource.systemd_unit_template      = node['mongodb']['systemd_unit_template']
+  new_resource.pid_file                   = new_resource.config['processManagement']['pidFilePath']
 
   # Upstart or sysvinit
   if node['platform'] == 'ubuntu' && node['platform_version'].to_f < 15.04
@@ -203,6 +204,19 @@ define :mongodb_instance,
     end
   end
 
+  # /usr/lib/systemd/system unit file
+  template '/usr/bin/percona-server-mongodb-helper.sh' do
+    cookbook new_resource.template_cookbook
+    source 'percona-server-mongodb-helper.sh.erb'
+    group new_resource.root_group
+    owner 'root'
+    mode '0755'
+    variables(
+      sysconfig_file: new_resource.sysconfig_file
+    )
+    notifies new_resource.reload_action, "service[#{new_resource.name}]"
+  end
+
   # Reload systemctl for RHEL 7+ after modifying the init file.
   execute "mongodb-systemctl-daemon-reload-#{new_resource.name}" do
     command 'systemctl daemon-reload'
@@ -217,7 +231,9 @@ define :mongodb_instance,
     owner 'root'
     mode '0644'
     variables(
-      provides: provider
+      sysconfig_file: new_resource.sysconfig_file,
+      provides: provider,
+      pid_file: new_resource.pid_file
     )
     notifies :run, "execute[mongodb-systemctl-daemon-reload-#{new_resource.name}]", :immediately
     notifies new_resource.reload_action, "service[#{new_resource.name}]"

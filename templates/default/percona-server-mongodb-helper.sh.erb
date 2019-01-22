@@ -1,0 +1,60 @@
+#!/bin/bash
+#
+PATH="${PATH}:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin"
+#
+SYSCONFIG=<%= @sysconfig_file %>
+
+. $SYSCONFIG
+
+[ -z "${CONF}" ] && CONF=/etc/mongod.conf
+
+PIDFILE=$(egrep -o '^[[:blank:]]+pidFilePath.*' ${CONF} | tr -d '[[:blank:]]' | awk -F':' '{print $NF}' | tr -d '"' 2>/dev/null)
+PIDFILE=${PIDFILE:-"/var/run/mongodb/mongod.pid"}
+OPTIONS=${OPTIONS:-"--config $CONF"}
+mkdir -p $(dirname $PIDFILE) $(dirname $STDOUT) $(dirname $STDERR)
+touch $PIDFILE $STDOUT $STDERR
+chown mongod:mongod $PIDFILE
+chown -R mongod:mongod $(dirname $STDOUT)
+#
+KTHP=/sys/kernel/mm/transparent_hugepage
+#
+print_error(){
+  echo " * Error disabling Transparent Huge pages, exiting"
+  exit 1
+}
+#
+
+DAEMON_OPTS="${OPTIONS}"
+#
+# Handle NUMA access to CPUs (SERVER-3574)
+# This verifies the existence of numactl as well as testing that the command works
+NUMACTL_ARGS="--interleave=all"
+if which numactl >/dev/null 2>/dev/null && numactl $NUMACTL_ARGS ls / >/dev/null 2>/dev/null
+then
+    NUMACTL="numactl $NUMACTL_ARGS"
+    DAEMON_OPTS=${DAEMON_OPTS:-"--config $CONF"}
+    NUMA_CONF=$(grep -c 'NUMACTL="numactl --interleave=all"' $SYSCONFIG)
+    if [ $NUMA_CONF = 0 ]
+    then
+        echo 'NUMACTL="numactl --interleave=all"' >> $SYSCONFIG
+    fi
+else
+    NUMACTL=""
+    DAEMON_OPTS=${DAEMON_OPTS:-"--config $CONF"}
+fi
+#
+# checking if storageEngine is defined twice (in default and config file)
+defaults=$(echo "${OPTIONS}" | egrep -o 'storageEngine.*' | tr -d '[[:blank:]]' | awk -F'=' '{print $NF}' 2>/dev/null)
+config=$(egrep -o '^[[:blank:]]+engine.*' ${CONF} | tr -d '[[:blank:]]' | awk -F':' '{print $NF}' 2>/dev/null)
+#
+if [ -n "${defaults}" ] && [ -n "${config}" ]; then # engine is set in 2 places
+  if [ "${defaults}" ==  "${config}" ]; then # it's OK
+    echo " * Warning, engine is set both in defaults file and mongod.conf!"
+  else
+    echo " * Error, different engines are set in the same time!"
+    exit 1
+  fi
+fi
+# disable THP
+fgrep '[always]' ${KTHP}/enabled  > /dev/null 2>&1 && (echo never > ${KTHP}/enabled 2> /dev/null || print_error) || true
+fgrep '[always]' ${KTHP}/defrag   > /dev/null 2>&1 && (echo never > ${KTHP}/defrag  2> /dev/null || print_error) || true
