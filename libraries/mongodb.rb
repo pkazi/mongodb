@@ -33,25 +33,27 @@ class Chef::ResourceDefinitionList::MongoDB
   # node['mongodb']['replica_priority'] is required
   #
 
-  def self.node_up?(mongo_host, mongo_port)
+  def self.node_up?(mongo_host, mongo_port, pem_key_file, ca_file)
     begin
       connection = nil
       rescue_connection_failure do
-        connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
+        # connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
+        connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
         connection.database_names # check connection
       end
     rescue => e
-      Chef::Log.warn("Could not connect to database: '#{mongo_host}:#{mongo_port}', reason: #{e}")
+      Chef::Log.warn("[node_up?] Could not connect to database: '#{mongo_host}:#{mongo_port}', reason: #{e}")
       return false
     end
-    return true
+    true
   end
 
-  def self.get_primary_node(mongo_host, mongo_port)
+  def self.get_primary_node(mongo_host, mongo_port, pem_key_file, ca_file)
     connection = nil
     rescue_connection_failure do
-      connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
-      connection.database_names # check connection
+      # connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
+      connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
+      # connection.database_names # check connection
       admin = connection['admin']
       cmd = BSON::OrderedHash.new
       cmd['isMaster'] = 1
@@ -59,7 +61,7 @@ class Chef::ResourceDefinitionList::MongoDB
       result.fetch('primary', nil)
     end
   rescue => e
-    Chef::Log.warn("Could not get the primary node from : '#{mongo_host}:#{mongo_port}', reason: #{e}")
+    Chef::Log.warn("[get_primary_node] Could not get the primary node from : '#{mongo_host}:#{mongo_port}', reason: #{e}")
     # return
     raise "Could not get the primary node from : '#{mongo_host}:#{mongo_port}', reason: #{e}"
   end
@@ -102,10 +104,36 @@ class Chef::ResourceDefinitionList::MongoDB
     member.freeze
   end
 
+  def self.retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
+    require 'mongo'
+
+    begin
+      Chef::Log.info("Connecting to #{mongo_host}:#{mongo_port} with SSL parameters.")
+      client = Mongo::MongoClient.new(mongo_host, mongo_port,
+                                      ssl: true,
+                                      ssl_ca_cert: ca_file,
+                                      ssl_cert: pem_key_file,
+                                      ssl_key: pem_key_file,
+                                      ssl_verify: true,
+                                      slave_ok: true,
+                                      op_timeout: 5,
+                                      connect_timeout: 10
+                                     )
+
+      # Query the server for all database names to verify server connection
+      client.database_names
+    rescue Mongo::ConnectionFailure => e
+      Chef::Log.fatal("[retrieve_db_connection] Unable to connect to mongodb, reason : #{e}")
+    end
+    client
+  end
+
   def self.configure_replicaset(node, name, members)
     # lazy require, to move loading this modules to runtime of the cookbook
     require 'rubygems'
     require 'mongo'
+    pem_key_file = node['mongodb']['config']['mongod']['net']['ssl']['PEMKeyFile']
+    ca_file = node['mongodb']['config']['mongod']['net']['ssl']['CAFile']
 
     if members.empty? && Chef::Config[:solo]
       Chef::Log.warn('Cannot search for member nodes with chef-solo, defaulting to single node replica set')
@@ -120,7 +148,7 @@ class Chef::ResourceDefinitionList::MongoDB
       mongo_fqdn = member['hostname']
       mongo_host = member['ipaddress']
       mongo_port = member['mongodb']['config']['mongod']['net']['port']
-      if node_up?(mongo_host, mongo_port)
+      if node_up?(mongo_host, mongo_port, pem_key_file, ca_file)
         Chef::Log.info("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is accessible. Nothing to do.")
       else
         Chef::Log.warn("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is not accessible. Removing it from chef search results.")
@@ -136,7 +164,7 @@ class Chef::ResourceDefinitionList::MongoDB
       Chef::Log.debug("This is not the first node from replica set #{name}, searching for primary node.")
       remote_host = members.first['ipaddress']
       remote_port = members.first['mongodb']['config']['mongod']['net']['port']
-      primary_node = get_primary_node(remote_host, remote_port)
+      primary_node = get_primary_node(remote_host, remote_port, pem_key_file, ca_file)
       if primary_node.nil?
         Chef::Log.warn("No primary node found for replica set #{name} [ #{mongo_host}:#{mongo_port} ], Please check mongodb instance status.")
         return
@@ -146,16 +174,18 @@ class Chef::ResourceDefinitionList::MongoDB
       mongo_port = primary_node.split(':')[1]
     end
 
-    begin
-      connection = nil
-      rescue_connection_failure do
-        connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
-        connection.database_names # check connection
-      end
-    rescue => e
-      Chef::Log.warn("Could not connect to database: '#{mongo_host}:#{mongo_port}', reason: #{e}")
-      return
-    end
+    # begin
+    #   connection = nil
+    #   rescue_connection_failure do
+    #     connection = Mongo::MongoClient.new(mongo_host, mongo_port, ssl: true, ssl_ca_cert: ca_file, ssl_cert: pem_key_file, ssl_key: pem_key_file, ssl_verify: true, slave_ok: true, connect_timeout: 5, socket_timeout: 5, max_read_retries: 5, server_selection_timeout: 3, op_timeout: 5)
+    #     connection.database_names # check connection
+    #   end
+    # rescue => e
+    #   Chef::Log.warn("Could not connect to database: '#{mongo_host}:#{mongo_port}', reason: #{e}")
+    #   return
+    # end
+
+    connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
 
     # Want the node originating the connection to be included in the replicaset
     members << node unless members.any? { |m| m.name == node.name }
@@ -189,10 +219,12 @@ class Chef::ResourceDefinitionList::MongoDB
     elsif result.fetch('errmsg', nil) =~ /(\S+) is already initiated/ || \
           result.fetch('errmsg', nil) == 'already initialized' || \
           result.fetch('errmsg', nil) =~ /is not empty on the initiating member/
+      Chef::Log.debug("replSetInitiate result is : #{result.fetch('errmsg', nil)}")
       mongo_configured_host, mongo_configured_port = \
         Regexp.last_match.nil? || Regexp.last_match.length < 2 ? [mongo_host, mongo_port] : Regexp.last_match[1].split(':')
       begin
-        connection = Mongo::Connection.new(mongo_configured_host, mongo_configured_port, op_timeout: 5, slave_ok: true)
+        # connection = Mongo::Connection.new(mongo_configured_host, mongo_configured_port, op_timeout: 5, slave_ok: true)
+        connection = retrieve_db_connection(mongo_configured_host, mongo_configured_port, pem_key_file, ca_file)
       rescue
         abort("Could not connect to database: '#{mongo_host}:#{mongo_port}'")
       end
@@ -239,7 +271,8 @@ class Chef::ResourceDefinitionList::MongoDB
           result = admin.command(cmd, check_response: false)
         rescue Mongo::ConnectionFailure
           # reconfiguring destroys existing connections, reconnect
-          connection = Mongo::Connection.new('localhost', node['mongodb']['config']['port'], op_timeout: 5, slave_ok: true)
+          # connection = Mongo::Connection.new('localhost', node['mongodb']['config']['port'], op_timeout: 5, slave_ok: true)
+          connection = retrieve_db_connection('localhost', mongo_port, pem_key_file, ca_file)
           config = connection['local']['system']['replset'].find_one('_id' => name)
           # Validate configuration change
           if config['members'] == rs_members
@@ -280,9 +313,11 @@ class Chef::ResourceDefinitionList::MongoDB
           when 0
             # deletes the replicaset
             force = true
-            rs_connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
+            rs_connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
+            # rs_connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
           else
-            rs_connection = Mongo::ReplSetConnection.new(old_members.map { |m| m['host'] })
+            rs_connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
+            # rs_connection = Mongo::ReplSetConnection.new(old_members.map { |m| m['host'] })
           end
           rs_connection.database_names # check connection
         end
@@ -297,7 +332,8 @@ class Chef::ResourceDefinitionList::MongoDB
           result = admin.command(cmd, force: force, check_response: false)
         rescue Mongo::ConnectionFailure
           # reconfiguring destroys existing connections, reconnect
-          connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
+          connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
+          # connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
           config = connection['local']['system']['replset'].find_one('_id' => name)
           # Validate configuration change
           if config['members'] == rs_members
@@ -320,13 +356,15 @@ class Chef::ResourceDefinitionList::MongoDB
     require 'mongo'
 
     shard_groups = Hash.new { |h, k| h[k] = [] }
+    pem_key_file = node['mongodb']['config']['mongos']['net']['ssl']['PEMKeyFile']
+    ca_file = node['mongodb']['config']['mongos']['net']['ssl']['CAFile']
 
     Chef::Log.info("Checking Mongo node availability from chef search resulted nodes :  #{shard_nodes.map { |n| n['hostname'] }.join(', ')}")
     shard_nodes.collect do |member|
       mongo_fqdn = member['hostname']
       mongo_host = member['ipaddress']
       mongo_port = member['mongodb']['config']['mongod']['net']['port']
-      if node_up?(mongo_host, mongo_port)
+      if node_up?(mongo_host, mongo_port, pem_key_file, ca_file)
         Chef::Log.info("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is accessible. Nothing to do.")
       else
         Chef::Log.warn("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is not accessible. Removing it from chef search results.")
@@ -362,7 +400,8 @@ class Chef::ResourceDefinitionList::MongoDB
     begin
       connection = nil
       rescue_connection_failure do
-        connection = Mongo::Connection.new('localhost', mongo_port, op_timeout: 5)
+        connection = retrieve_db_connection('localhost', mongo_port, pem_key_file, ca_file)
+        # connection = Mongo::Connection.new('localhost', mongo_port, op_timeout: 5)
       end
     rescue => e
       Chef::Log.warn("Could not connect to database: 'localhost:#{mongo_port}', reason #{e}")
@@ -410,11 +449,14 @@ class Chef::ResourceDefinitionList::MongoDB
     require 'mongo'
 
     mongo_port = node['mongodb']['config']['mongos']['net']['port']
+    pem_key_file = node['mongodb']['config']['mongos']['net']['ssl']['PEMKeyFile']
+    ca_file = node['mongodb']['config']['mongos']['net']['ssl']['CAFile']
 
     begin
       connection = nil
       rescue_connection_failure do
-        connection = Mongo::Connection.new('localhost', mongo_port, op_timeout: 5)
+        connection = retrieve_db_connection('localhost', mongo_port, pem_key_file, ca_file)
+        # connection = Mongo::Connection.new('localhost', mongo_port, op_timeout: 5)
       end
     rescue => e
       Chef::Log.warn("Could not connect to database: 'localhost:#{mongo_port}', reason #{e}")
