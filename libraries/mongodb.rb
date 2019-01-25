@@ -79,7 +79,7 @@ class Chef::ResourceDefinitionList::MongoDB
     return {} if node['fqdn'] =~ /\.vagrantup\.com$/
 
     port = node['mongodb']['config']['mongod']['net']['port']
-    host = node['mongodb']['use_ip_address'] ? node['ipaddress'] : node['fqdn']
+    host = node['mongodb']['hostname']
     address = "#{host}:#{port}"
 
     member = {}
@@ -140,19 +140,18 @@ class Chef::ResourceDefinitionList::MongoDB
     end
 
     Chef::Log.debug('Removing Self from replica set nodes.')
-    members.delete_if { |m| m['ipaddress'] == node['ipaddress'] }
+    members.delete_if { |m| m['mongodb']['hostname'] == node['mongodb']['hostname'] }
 
-    Chef::Log.info("Checking Mongo node availability from chef search resulted nodes :  #{members.map { |n| n['hostname'] }.join(', ')}") unless members.empty?
+    Chef::Log.info("Checking Mongo node availability from chef search resulted nodes :  #{members.map { |n| n['mongodb']['hostname'] }.join(', ')}") unless members.empty?
     members_dup = members.dup
     members_dup.collect do |member|
-      mongo_fqdn = member['hostname']
-      mongo_host = member['ipaddress']
+      mongo_host = member['mongodb']['hostname']
       mongo_port = member['mongodb']['config']['mongod']['net']['port']
       if node_up?(mongo_host, mongo_port, pem_key_file, ca_file)
-        Chef::Log.info("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is accessible. Nothing to do.")
+        Chef::Log.info("Mongo Node [ #{mongo_host}:#{mongo_port} ] is accessible. Nothing to do.")
       else
-        Chef::Log.warn("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is not accessible. Removing it from chef search results.")
-        members.delete_if { |m| m['ipaddress'] == mongo_host }
+        Chef::Log.warn("Mongo Node [ #{mongo_host}:#{mongo_port} ] is not accessible. Removing it from chef search results.")
+        members.delete_if { |m| m['mongodb']['hostname'] == mongo_host }
       end
     end
 
@@ -162,7 +161,7 @@ class Chef::ResourceDefinitionList::MongoDB
       mongo_port = node['mongodb']['config']['mongod']['net']['port']
     else
       Chef::Log.debug("This is not the first node from replica set #{name}, searching for primary node.")
-      remote_host = members.first['ipaddress']
+      remote_host = members.first['mongodb']['hostname']
       remote_port = members.first['mongodb']['config']['mongod']['net']['port']
       primary_node = get_primary_node(remote_host, remote_port, pem_key_file, ca_file)
       if primary_node.nil?
@@ -194,7 +193,7 @@ class Chef::ResourceDefinitionList::MongoDB
     rs_members = members.each_with_index.map { |member, n| create_replicaset_member(member).merge('_id' => n) }.select { |m| m.key? 'host' }
 
     Chef::Log.info(
-      "Configuring replicaset with members #{members.map { |n| n['hostname'] }.join(', ')}"
+      "Configuring replicaset with members #{members.map { |n| n['mongodb']['hostname'] }.join(', ')}"
     )
 
     Chef::Log.debug(
@@ -248,7 +247,7 @@ class Chef::ResourceDefinitionList::MongoDB
         rs_member_ips.each do |mem_h|
           members.each do |n|
             ip, prt = mem_h['host'].split(':')
-            mapping["#{ip}:#{prt}"] = "#{n['fqdn']}:#{prt}" if ip == n['ipaddress']
+            mapping["#{ip}:#{prt}"] = "#{n['mongodb']['hostname']}:#{prt}" if ip == n['ipaddress']
           end
         end
         config['members'].map! do |m|
@@ -359,16 +358,15 @@ class Chef::ResourceDefinitionList::MongoDB
     pem_key_file = node['mongodb']['config']['mongos']['net']['ssl']['PEMKeyFile']
     ca_file = node['mongodb']['config']['mongos']['net']['ssl']['CAFile']
 
-    Chef::Log.info("Checking Mongo node availability from chef search resulted nodes :  #{shard_nodes.map { |n| n['hostname'] }.join(', ')}")
+    Chef::Log.info("Checking Mongo node availability from chef search resulted nodes :  #{shard_nodes.map { |n| n['mongodb']['hostname'] }.join(', ')}")
     shard_nodes.collect do |member|
-      mongo_fqdn = member['hostname']
-      mongo_host = member['ipaddress']
+      mongo_host = member['mongodb']['hostname']
       mongo_port = member['mongodb']['config']['mongod']['net']['port']
       if node_up?(mongo_host, mongo_port, pem_key_file, ca_file)
-        Chef::Log.info("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is accessible. Nothing to do.")
+        Chef::Log.info("Mongo Node [ #{mongo_host}:#{mongo_port} ] is accessible. Nothing to do.")
       else
-        Chef::Log.warn("Mongo Node #{mongo_fqdn} [ #{mongo_host}:#{mongo_port} ] is not accessible. Removing it from chef search results.")
-        shard_nodes.delete_if { |m| m['ipaddress'] == mongo_host }
+        Chef::Log.warn("Mongo Node [ #{mongo_host}:#{mongo_port} ] is not accessible. Removing it from chef search results.")
+        shard_nodes.delete_if { |m| m['mongodb']['hostname'] == mongo_host }
       end
     end
 
@@ -381,7 +379,7 @@ class Chef::ResourceDefinitionList::MongoDB
       else
         key = '_single'
       end
-      shard_groups[key] << "#{n['ipaddress']}:#{n['mongodb']['config']['mongod']['net']['port']}"
+      shard_groups[key] << "#{n['mongodb']['hostname']}:#{n['mongodb']['config']['mongod']['net']['port']}"
     end
     Chef::Log.info(shard_groups.inspect)
 

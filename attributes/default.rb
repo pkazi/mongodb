@@ -120,4 +120,6 @@ default['mongodb']['ruby_gems'] = {
   bson_ext: nil,
 }
 
-default['mongodb']['use_ip_address'] = true
+# set default['mongodb']['hostname'] = node['ipaddress] / node['fqdn']
+# this value will be used throughout the replicaset formation and shard creation
+default['mongodb']['hostname'] = node['ipaddress']

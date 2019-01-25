@@ -53,7 +53,7 @@ define :mongodb_instance,
     # Search for config servers
     unless node['mongodb']['config']['mongos']['sharding']['configDB']
       new_resource.configservers = params[:configservers].map do |n|
-        "#{(n['mongodb']['configserver_url'] || n['ipaddress'])}:#{n['mongodb']['config']['mongod']['net']['port']}"
+        "#{(n['mongodb']['configserver_url'] || n['mongodb']['hostname'])}:#{n['mongodb']['config']['mongod']['net']['port']}"
       end.sort.join(',')
 
       # Get the replica set name of first config server, since mongodb 3.4 requires replicated config servers
