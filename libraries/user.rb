@@ -1,6 +1,8 @@
 module MongoDB
   module Helpers
     module User
+      include MongoDB::Helpers::Helper
+
       def user_exists?(username, connection)
         connection['admin']['system.users'].find(user: username).count > 0
       end
@@ -13,6 +15,17 @@ module MongoDB
         require 'rubygems'
         require 'mongo'
 
+        if @new_resource.connection['is_mongos'].nil? || @new_resource.connection['is_mongos'] == false
+          result = master_command('localhost', @new_resource.connection['config']['mongod']['net']['port'], @new_resource.connection['config']['mongod']['net']['ssl']['PEMKeyFile'], @new_resource.connection['config']['mongod']['net']['ssl']['CAFile'], @new_resource.connection['authentication']['username'], @new_resource.connection['authentication']['password'])
+          if result.fetch('info', nil) =~ /Does not have a valid replica set config/
+            Chef::Log.info("This node is not part of any replicaset, skipping user creation. : #{result.fetch('info', nil)}")
+            return
+          end
+          if result.fetch('secondary', nil)
+            Chef::Log.info('This node is a secondary node from replicaset, skipping user creation.')
+            return
+          end
+        end
         connection = retrieve_db
         admin = connection.db('admin')
         db = connection.db(database)
@@ -32,14 +45,14 @@ module MongoDB
           begin
             admin.authenticate(@new_resource.connection['authentication']['username'], @new_resource.connection['authentication']['password'])
           rescue Mongo::AuthenticationError => e
-            Chef::Log.warn("Unable to authenticate as admin user. If this is a fresh install, ignore warning: #{e}")
+            Chef::Log.warn("Unable to authenticate as #{@new_resource.connection['authentication']['username']} user. If this is a fresh install, ignore warning: #{e}")
           end
         end
 
         # Create the user if they don't exist
         # Update the user if they already exist
         begin
-          db.add_user(username, password, false, roles: roles)
+          db.add_user(username, password, false, roles: roles, mechanisms: ['SCRAM-SHA-1'])
           Chef::Log.info("Created or updated user #{username} on #{database}")
         rescue Mongo::ConnectionFailure => e
           if @new_resource.connection['is_replicaset']
@@ -56,7 +69,7 @@ module MongoDB
                 has_info_message = result['members'].select { |a| a['self'] && a.key?('infoMessage') }.count > 0
                 if result['myState'] == 1
                   # This node is a primary node, try to add the user
-                  db.add_user(username, password, false, roles: roles)
+                  db.add_user(username, password, false, roles: roles, mechanisms: ['SCRAM-SHA-1'])
                   Chef::Log.info("Created or updated user #{username} on #{database} of primary replicaset node")
                   break
                 elsif result['myState'] == 2 && has_info_message == true
@@ -103,7 +116,7 @@ module MongoDB
             )
           rescue Mongo::Auth::Unauthorized => e
             # invalid creds
-            Chef::Log.warn("Unable to authenticate as admin user. If this is a fresh install, ignore warning: #{e}")
+            Chef::Log.warn("Unable to authenticate as #{@new_resource.connection['authentication']['username']} user. If this is a fresh install, ignore warning: #{e}")
             connection = retrieve_db_v2
           rescue Mongo::Error::NoServerAvailable => e
             # Replicaset not initialized
@@ -240,12 +253,18 @@ module MongoDB
         require 'mongo'
 
         begin
-          Mongo::MongoClient.new(
-            @new_resource.connection['host'],
-            @new_resource.connection['port'],
-            connect_timeout: 15,
-            slave_ok: true
-          )
+          config_type = @new_resource.connection['is_mongos'] ? 'mongos' : 'mongod'
+          Mongo::MongoClient.new('localhost',
+                                  @new_resource.connection['config'][config_type]['net']['port'],
+                                  ssl: true,
+                                  ssl_ca_cert: @new_resource.connection['config'][config_type]['net']['ssl']['CAFile'],
+                                  ssl_cert: @new_resource.connection['config'][config_type]['net']['ssl']['PEMKeyFile'],
+                                  ssl_key: @new_resource.connection['config'][config_type]['net']['ssl']['PEMKeyFile'],
+                                  ssl_verify: true,
+                                  slave_ok: true,
+                                  op_timeout: 5,
+                                  connect_timeout: 15
+                                )
         rescue Mongo::ConnectionFailure
           if attempt < @new_resource.connection['user_management']['connection']['retries']
             Chef::Log.warn("Unable to connect to MongoDB instance, retrying in #{@new_resource.connection['user_management']['connection']['delay']} second(s)...")

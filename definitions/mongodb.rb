@@ -268,8 +268,8 @@ define :mongodb_instance,
     new_resource.service_notifies.each do |service_notify|
       notifies :run, service_notify
     end
-    #notifies :run, 'ruby_block[config_replicaset]', :immediately if new_resource.is_replicaset && new_resource.auto_configure_replicaset
-    #notifies :run, 'ruby_block[config_sharding]', :immediately if new_resource.is_mongos && new_resource.auto_configure_sharding
+    # notifies :run, 'ruby_block[config_replicaset]', :immediately if new_resource.is_replicaset && new_resource.auto_configure_replicaset
+    # notifies :run, 'ruby_block[config_sharding]', :immediately if new_resource.is_mongos && new_resource.auto_configure_sharding
     # we don't care about a running mongodb service in these cases, all we need is stopping it
     ignore_failure true if new_resource.name == 'mongodb'
   end
@@ -287,6 +287,8 @@ define :mongodb_instance,
     ruby_block 'config_replicaset' do
       block do
         MongoDB.configure_replicaset(node, replicaset_name, rs_nodes) unless new_resource.replicaset.nil?
+        Chef::Log.info('Sleeping for 60 seconds for replicaset to get configured properly.')
+        sleep(60)
       end
       action :nothing
     end
@@ -308,7 +310,7 @@ define :mongodb_instance,
       'mongodb_is_shard:true AND '\
       "chef_environment:#{node.chef_environment}"
     )
-    #"mongodb_shard_name:#{new_resource.shard_name} AND "\
+
     ruby_block 'config_sharding' do
       block do
         MongoDB.configure_shards(node, shard_nodes)

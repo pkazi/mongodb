@@ -39,7 +39,7 @@ class Chef::ResourceDefinitionList::MongoDB
       rescue_connection_failure do
         # connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
         connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
-        connection.database_names # check connection
+        # connection.database_names # check connection
       end
     rescue => e
       Chef::Log.warn("[node_up?] Could not connect to database: '#{mongo_host}:#{mongo_port}', reason: #{e}")
@@ -48,13 +48,14 @@ class Chef::ResourceDefinitionList::MongoDB
     true
   end
 
-  def self.get_primary_node(mongo_host, mongo_port, pem_key_file, ca_file)
+  def self.get_primary_node(mongo_host, mongo_port, pem_key_file, ca_file, username, password)
     connection = nil
     rescue_connection_failure do
       # connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
       connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
       # connection.database_names # check connection
       admin = connection['admin']
+      authenticate_db(admin, username, password)
       cmd = BSON::OrderedHash.new
       cmd['isMaster'] = 1
       result = admin.command(cmd, check_response: false)
@@ -108,7 +109,7 @@ class Chef::ResourceDefinitionList::MongoDB
     require 'mongo'
 
     begin
-      Chef::Log.info("Connecting to #{mongo_host}:#{mongo_port} with SSL parameters.")
+      Chef::Log.debug("Connecting to #{mongo_host}:#{mongo_port} with SSL parameters.")
       client = Mongo::MongoClient.new(mongo_host, mongo_port,
                                       ssl: true,
                                       ssl_ca_cert: ca_file,
@@ -121,11 +122,19 @@ class Chef::ResourceDefinitionList::MongoDB
                                      )
 
       # Query the server for all database names to verify server connection
-      client.database_names
+      # client.database_names
     rescue Mongo::ConnectionFailure => e
       Chef::Log.fatal("[retrieve_db_connection] Unable to connect to mongodb, reason : #{e}")
     end
     client
+  end
+
+  def self.authenticate_db(database, username, password)
+    require 'mongo'
+    database.authenticate(username, password)
+  rescue Mongo::AuthenticationError => e
+    Chef::Log.warn("Unable to authenticate as #{username} user. If this is a fresh install, ignore warning: #{e}")
+    # raise "Unable to authenticate as #{username} user, reason: #{e}"
   end
 
   def self.configure_replicaset(node, name, members)
@@ -134,7 +143,8 @@ class Chef::ResourceDefinitionList::MongoDB
     require 'mongo'
     pem_key_file = node['mongodb']['config']['mongod']['net']['ssl']['PEMKeyFile']
     ca_file = node['mongodb']['config']['mongod']['net']['ssl']['CAFile']
-
+    username = node['mongodb']['authentication']['username']
+    password = node['mongodb']['authentication']['password']
     if members.empty? && Chef::Config[:solo]
       Chef::Log.warn('Cannot search for member nodes with chef-solo, defaulting to single node replica set')
     end
@@ -163,7 +173,7 @@ class Chef::ResourceDefinitionList::MongoDB
       Chef::Log.debug("This is not the first node from replica set #{name}, searching for primary node.")
       remote_host = members.first['mongodb']['hostname']
       remote_port = members.first['mongodb']['config']['mongod']['net']['port']
-      primary_node = get_primary_node(remote_host, remote_port, pem_key_file, ca_file)
+      primary_node = get_primary_node(remote_host, remote_port, pem_key_file, ca_file, username, password)
       if primary_node.nil?
         Chef::Log.warn("No primary node found for replica set #{name} [ #{mongo_host}:#{mongo_port} ], Please check mongodb instance status.")
         return
@@ -201,6 +211,10 @@ class Chef::ResourceDefinitionList::MongoDB
     )
 
     admin = connection['admin']
+    # if mongo_host != 'localhost' && node['mongodb']['config']['auth']
+    # Chef::Log.debug('Authenticating on admin database since this is not the first node from replicaset.')
+    authenticate_db(admin, username, password)
+    # end
     cmd = BSON::OrderedHash.new
     cmd['replSetInitiate'] = {
       '_id' => name,
@@ -208,6 +222,7 @@ class Chef::ResourceDefinitionList::MongoDB
     }
 
     begin
+      Chef::Log.debug("Running command : #{cmd}")
       result = admin.command(cmd, check_response: false)
     rescue Mongo::OperationTimeout
       Chef::Log.info('Started configuring the replicaset, this will take some time, another run should run smoothly')
@@ -215,6 +230,7 @@ class Chef::ResourceDefinitionList::MongoDB
     end
     if result.fetch('ok', nil) == 1
       # everything is fine, do nothing
+      Chef::Log.info("Replicaset is initialised successfully : #{result}")
     elsif result.fetch('errmsg', nil) =~ /(\S+) is already initiated/ || \
           result.fetch('errmsg', nil) == 'already initialized' || \
           result.fetch('errmsg', nil) =~ /is not empty on the initiating member/
@@ -233,6 +249,8 @@ class Chef::ResourceDefinitionList::MongoDB
         { '_id' => n, 'host' => "#{member['ipaddress']}:#{port}" }
       end
 
+      admin = connection['admin']
+      authenticate_db(admin, username, password) if node['mongodb']['config']['auth']
       # check if both configs are the same
       config = connection['local']['system']['replset'].find_one('_id' => name)
       Chef::Log.debug "Current members are #{config['members']} and we expect #{rs_members}"
@@ -267,7 +285,9 @@ class Chef::ResourceDefinitionList::MongoDB
         cmd['replSetReconfig'] = config
         result = nil
         begin
+          Chef::Log.debug("Running command : #{cmd}")
           result = admin.command(cmd, check_response: false)
+          Chef::Log.info("Replicaset is reconfigured successfully : #{result}") if result.fetch('errmsg', nil).nil?
         rescue Mongo::ConnectionFailure
           # reconfiguring destroys existing connections, reconnect
           # connection = Mongo::Connection.new('localhost', node['mongodb']['config']['port'], op_timeout: 5, slave_ok: true)
@@ -295,7 +315,7 @@ class Chef::ResourceDefinitionList::MongoDB
 
         # use the _id value when present, use a generated one from ids otherwise
         # new_members = new_members_by_host.map { |h, m| old_members_by_host.fetch(h, {}).merge(m) }
-        new_members = new_members_by_host.map { |h, m| old_members_by_host.fetch(h, {}).empty? ? m.merge({"_id" => old_ids.max+1 }) : m.merge(old_members_by_host.fetch(h, {})) }
+        new_members = new_members_by_host.map { |h, m| old_members_by_host.fetch(h, {}).empty? ? m.merge({ "_id" => old_ids.max+1 }) : m.merge(old_members_by_host.fetch(h, {})) }
 
         new_members.map! { |member| member.merge('_id' => (member['_id'] || ids.shift)) }
 
@@ -318,21 +338,25 @@ class Chef::ResourceDefinitionList::MongoDB
             rs_connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
             # rs_connection = Mongo::ReplSetConnection.new(old_members.map { |m| m['host'] })
           end
-          rs_connection.database_names # check connection
+          # rs_connection.database_names # check connection
         end
 
         admin = rs_connection['admin']
-
+        authenticate_db(admin, username, password) if node['mongodb']['config']['auth']
         cmd = BSON::OrderedHash.new
         cmd['replSetReconfig'] = new_config
 
         result = nil
         begin
+          Chef::Log.debug("Running command : #{cmd}")
           result = admin.command(cmd, force: force, check_response: false)
+          Chef::Log.info("Replicaset is reconfigured successfully : #{result}") if result.fetch('errmsg', nil).nil?
         rescue Mongo::ConnectionFailure
           # reconfiguring destroys existing connections, reconnect
           connection = retrieve_db_connection(mongo_host, mongo_port, pem_key_file, ca_file)
           # connection = Mongo::Connection.new(mongo_host, mongo_port, op_timeout: 5, slave_ok: true)
+          admin = connection['admin']
+          authenticate_db(admin, username, password) if node['mongodb']['config']['auth']
           config = connection['local']['system']['replset'].find_one('_id' => name)
           # Validate configuration change
           if config['members'] == rs_members
@@ -407,15 +431,15 @@ class Chef::ResourceDefinitionList::MongoDB
     end
 
     admin = connection['admin']
-
-    # If we require authentication on mongos / mongod, need to authenticate to run these commands
-    if node.recipe?('sc-mongodb::user_management')
-      begin
-        admin.authenticate(node['mongodb']['authentication']['username'], node['mongodb']['authentication']['password'])
-      rescue Mongo::AuthenticationError => e
-        Chef::Log.warn("Unable to authenticate with database to add shards to mongos node: #{e}")
-      end
-    end
+    authenticate_db(admin, node['mongodb']['authentication']['username'], node['mongodb']['authentication']['password']) if node['mongodb']['config']['auth']
+    # # If we require authentication on mongos / mongod, need to authenticate to run these commands
+    # if node.recipe?('sc-mongodb::user_management')
+    #   begin
+    #     admin.authenticate(node['mongodb']['authentication']['username'], node['mongodb']['authentication']['password'])
+    #   rescue Mongo::AuthenticationError => e
+    #     Chef::Log.warn("Unable to authenticate with database to add shards to mongos node: #{e}")
+    #   end
+    # end
 
     shard_members.each do |shard|
       cmd = BSON::OrderedHash.new
@@ -423,6 +447,7 @@ class Chef::ResourceDefinitionList::MongoDB
       require 'pry'
       # binding.pry
       begin
+        Chef::Log.debug("Running command : #{cmd}")
         result = admin.command(cmd, check_response: false)
       rescue Mongo::OperationTimeout
         result = "Adding shard '#{shard}' timed out, run the recipe again to check the result"
@@ -462,15 +487,15 @@ class Chef::ResourceDefinitionList::MongoDB
     end
 
     admin = connection['admin']
-
-    # If we require authentication on mongos / mongod, need to authenticate to run these commands
-    if node.recipe?('sc-mongodb::user_management')
-      begin
-        admin.authenticate(node['mongodb']['authentication']['username'], node['mongodb']['authentication']['password'])
-      rescue Mongo::AuthenticationError => e
-        Chef::Log.warn("Unable to authenticate with database to configure databased on mongos node: #{e}")
-      end
-    end
+    authenticate_db(admin, node['mongodb']['authentication']['username'], node['mongodb']['authentication']['password']) if node['mongodb']['config']['auth']
+    # # If we require authentication on mongos / mongod, need to authenticate to run these commands
+    # if node.recipe?('sc-mongodb::user_management')
+    #   begin
+    #     admin.authenticate(node['mongodb']['authentication']['username'], node['mongodb']['authentication']['password'])
+    #   rescue Mongo::AuthenticationError => e
+    #     Chef::Log.warn("Unable to authenticate with database to configure databased on mongos node: #{e}")
+    #   end
+    # end
 
     databases = sharded_collections.keys.map { |x| x.split('.').first }.uniq
     Chef::Log.info("enable sharding for these databases: '#{databases.inspect}'")
@@ -479,6 +504,7 @@ class Chef::ResourceDefinitionList::MongoDB
       cmd = BSON::OrderedHash.new
       cmd['enablesharding'] = db_name
       begin
+        Chef::Log.debug("Running command : #{cmd}")
         result = admin.command(cmd, check_response: false)
       rescue Mongo::OperationTimeout
         result = "enable sharding for '#{db_name}' timed out, run the recipe again to check the result"
@@ -502,6 +528,7 @@ class Chef::ResourceDefinitionList::MongoDB
       cmd['shardcollection'] = name
       cmd['key'] = { key => 1 }
       begin
+        Chef::Log.debug("Running command : #{cmd}")
         result = admin.command(cmd, check_response: false)
       rescue Mongo::OperationTimeout
         result = "sharding '#{name}' on key '#{key}' timed out, run the recipe again to check the result"
